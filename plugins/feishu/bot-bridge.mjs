@@ -571,17 +571,22 @@ export class FeishuBotBridge {
 
 		// 2. Run completed
 		if (ev.type === "run_end") {
-			const run = this.pendingRuns.get(convId) || this.earlyRuns.get(convId);
-			if (!run) {
-				// run_end 先于 host.chat 回执到达：记「已结束」，回执到手时补发
-				const early = this.earlyRuns.get(convId) || { accumulatedText: "", ended: false };
-				early.ended = true;
-				this.earlyRuns.set(convId, early);
+			const pending = this.pendingRuns.get(convId);
+			if (pending) {
+				this.pendingRuns.delete(convId);
+				this.earlyRuns.delete(convId);
+				await this.deliverReply(pending);
 				return;
 			}
-			this.pendingRuns.delete(convId);
-			this.earlyRuns.delete(convId);
-			await this.deliverReply(run);
+
+			// 走到这里说明 run_end 先于 host.chat 回执到达（宿主是 fire-and-forget，
+			// 模型跑得快时很常见）。earlyRuns 里只有累积文本、没有 chatId/messageId，
+			// 直接回发会报 "Target receiveId (or defaultChatId) is required" 且把
+			// 上下文丢掉；正确做法是标记「已结束」，等回执到手用 pending 补发。
+			const early = this.earlyRuns.get(convId) || { accumulatedText: "", ended: false };
+			early.ended = true;
+			this.earlyRuns.set(convId, early);
+			return;
 		}
 	}
 

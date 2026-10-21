@@ -204,6 +204,70 @@ describe("FeishuBotBridge 双工通信流程测试", () => {
 		await bridge.stop();
 	});
 
+	it("run_end 早于 host.chat 回执时不得用无 chatId 的临时 run 回发（回归）", async () => {
+		let registeredRunHandler: ((ev: any) => void) | null = null;
+		let resolveReceipt: ((v: any) => void) | null = null;
+		const chatSpy = vi.fn().mockImplementation(
+			() => new Promise((resolve) => (resolveReceipt = resolve)),
+		);
+		const replySpy = vi.fn().mockResolvedValue({ success: true });
+		const sendSpy = vi.fn().mockResolvedValue({ success: true });
+
+		const bridge = new FeishuBotBridge({
+			host: {
+				chat: chatSpy,
+				onRunEvent: (fn: any) => {
+					registeredRunHandler = fn;
+					return () => {};
+				},
+			},
+			getConfig: () => ({ appId: "cli_123", appSecret: "sec_123" }),
+			sendMessage: sendSpy,
+			replyMessage: replySpy,
+			reactMessage: vi.fn().mockResolvedValue({ success: true }),
+		} as any);
+
+		await bridge.start();
+
+		// 入站消息：host.chat 挂起，回执稍后才到（模拟宿主 fire-and-forget）
+		const inbound = bridge.onInboundMessage({
+			message: {
+				message_id: "om_early",
+				chat_id: "oc_early",
+				message_type: "text",
+				content: JSON.stringify({ text: "快问快答" }),
+			},
+			sender: { sender_type: "user", sender_id: { open_id: "ou_early" } },
+		});
+
+		// 宿主用「自己的」conversationId 推事件，而且模型很快结束 —— 两步都早于回执
+		registeredRunHandler!({
+			conversationId: "conv_host_early",
+			type: "message",
+			message: { role: "assistant", content: "立即给出的回答" },
+		});
+		await registeredRunHandler!({
+			conversationId: "conv_host_early",
+			type: "run_end",
+		});
+
+		// 此刻不能拿没有 chatId 的临时对象去发消息
+		expect(sendSpy).not.toHaveBeenCalled();
+		expect(replySpy).not.toHaveBeenCalled();
+
+		// 回执到达后应补发到原始消息
+		resolveReceipt!({ conversationId: "conv_host_early" });
+		await inbound;
+
+		expect(replySpy).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ messageId: "om_early", text: "立即给出的回答" }),
+		);
+		expect(sendSpy).not.toHaveBeenCalled();
+
+		await bridge.stop();
+	});
+
 	it("支持配置默认项目根目录 workspace 以及通过 /cwd 指令动态切换工作目录并透传给 host.chat", async () => {
 		const chatSpy = vi.fn().mockResolvedValue({ conversationId: "conv_cwd_1" });
 		const replySpy = vi.fn().mockResolvedValue({ success: true });
